@@ -1,3 +1,6 @@
+use rust_mini_gpt::config;
+use rust_mini_gpt::tokenizer;
+
 fn main() {
-    println!("Hello, world!");
+    let config = config::Config::new(1024, 50257, 12, 16, 768);
 }
