@@ -2703,6 +2703,7 @@ name = "rust-mini-gpt"
 version = "0.1.0"
 dependencies = [
  "polars",
+ "regex",
  "tch",
  "tokenizers",
 ]
