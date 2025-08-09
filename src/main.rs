@@ -1,4 +1,5 @@
 use rust_mini_gpt::config;
+use rust_mini_gpt::custom_tokenizer;
 use rust_mini_gpt::tokenizer;
 
 fn main() {

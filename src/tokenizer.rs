@@ -1,15 +1,15 @@
-use tokenizers::Tokenizer;
+use tokenizers::tokenizer::{Result, Tokenizer};
 
-fn tokenize(sentence: &str) -> Vec<i64> {
-    let tokenizer = Tokenizer::new("gpt2");
-    let tokens = tokenizer.encode(sentence, true).unwrap();
+pub fn tokenize(sentence: &str) -> Result<Vec<u32>> {
+    let tokenizer = Tokenizer::from_pretrained("bert-base-cased", None)?;
+    let tokens = tokenizer.encode(sentence, false)?;
 
-    return tokens.get_ids().iter().map(|id| *id as f64).collect();
+    return Ok(tokens.get_ids().iter().copied().collect());
 }
 
-fn decode(tokens: Vec<i64>) -> String {
-    let tokenizer = Tokenizer::new("gpt2");
-    let decoded = tokenizer.decode(tokens, true).unwrap();
+pub fn decode(tokens: Vec<u32>) -> Result<String> {
+    let tokenizer = Tokenizer::from_pretrained("bert-base-cased", None)?;
+    let decoded = tokenizer.decode(&tokens, true)?;
 
-    return decoded;
+    return Ok(decoded);
 }

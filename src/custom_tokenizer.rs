@@ -2,16 +2,16 @@ use regex::Regex;
 use std::collections::HashMap;
 
 pub struct CustomTokenizer {
-    original_vocab_size: i32,
-    merge_dict: HashMap<i32, i32>,
-    vocab: HashMap<i32, String>,
-    final_vocab_size: Option<i32>,
-    merge_order: Vec<(i32, i32)>,
+    original_vocab_size: u32,
+    merge_dict: HashMap<(u32, u32), u32>,
+    vocab: HashMap<u32, String>,
+    final_vocab_size: Option<u32>,
+    merge_order: Vec<(u32, u32)>,
 }
 
 impl CustomTokenizer {
     pub fn new() -> CustomTokenizer {
-        let mut vocab: HashMap<i32, String> = (0..256)
+        let vocab: HashMap<u32, String> = (0..256)
             .map(|idx| {
                 let byte_char = char::from(idx as u8);
                 (idx, byte_char.to_string())
@@ -27,8 +27,8 @@ impl CustomTokenizer {
         }
     }
 
-    fn get_stats(&self, tokens: Vec<i32>) -> Vec<((i32, i32), i32)> {
-        let mut counts: HashMap<(i32, i32), i32> = HashMap::new();
+    fn get_stats(&self, tokens: Vec<u32>) -> Vec<((u32, u32), u32)> {
+        let mut counts: HashMap<(u32, u32), u32> = HashMap::new();
 
         for window in tokens.windows(2) {
             if let [first, second] = window {
@@ -37,13 +37,13 @@ impl CustomTokenizer {
             }
         }
 
-        let mut result: Vec<((i32, i32), i32)> = counts.into_iter().collect();
+        let mut result: Vec<((u32, u32), u32)> = counts.into_iter().collect();
         result.sort_by(|a, b| b.1.cmp(&a.1)); // sort decreasing
 
         return result;
     }
 
-    fn merge_tokens(&self, pair: (i32, i32), tokens: Vec<i32>, new_id: i32) -> Vec<i32> {
+    fn merge_tokens(&self, pair: (u32, u32), tokens: Vec<u32>, new_id: u32) -> Vec<u32> {
         let mut new_tokens = Vec::new();
         let mut i = 0;
 
@@ -97,20 +97,16 @@ impl CustomTokenizer {
         return bytes;
     }
 
-    pub fn encode(&self, text: &str) -> Vec<i32> {
+    pub fn encode(&self, text: &str) -> Vec<u32> {
         if self.merge_order.is_empty() {
             panic!("Merge order is empty, train or load file first");
         }
 
-        let mut chunk_tokens = text_to_bytes(text)
+        let mut chunk_tokens = self
+            .text_to_bytes(text)
             .into_iter()
-            .map(|chunk| {
-                chunk
-                    .into_iter()
-                    .map(|byte| byte as i32)
-                    .collect::<Vec<i32>>()
-            })
-            .collect::<Vec<Vec<i32>>>();
+            .map(|chunk| chunk.into_iter().collect::<Vec<u32>>())
+            .collect::<Vec<Vec<u32>>>();
 
         for pair in &self.merge_order {
             if let Some(&new_id) = self.merge_dict.get(pair) {
@@ -123,7 +119,7 @@ impl CustomTokenizer {
         return chunk_tokens.into_iter().flatten().collect();
     }
 
-    pub fn decode(&self, tokens: Vec<i32>) -> String {
+    pub fn decode(&self, tokens: Vec<u32>) -> String {
         if self.vocab.is_empty() {
             panic!("Vocab is empty, train or load file first");
         }
@@ -131,19 +127,20 @@ impl CustomTokenizer {
         // Map tokens to bytes via vocab
         let bytes: Vec<u8> = tokens
             .iter()
-            .filter_map(|&tokens_id| self.vocab.get(&token_id))
+            .filter_map(|&token_id| self.vocab.get(&token_id))
             .flat_map(|token_str| token_str.as_bytes())
+            .copied() // .collect needs each to be a u8 not &u8
             .collect();
 
         return String::from_utf8_lossy(&bytes).to_string();
     }
 
-    pub fn train(&mut self, text: &str, final_vocab_size: i32) {
+    pub fn train(&mut self, text: &str, final_vocab_size: u32) {
         // Train BPE encoder on given text
-        self.final_vocab_size = final_vocab_size;
+        self.final_vocab_size = Some(final_vocab_size);
 
-        let chunk_tokens = self.text_to_bytes(text);
-        let num_merges = self.final_vocab_size - self.original_vocab_size;
+        let mut chunk_tokens = self.text_to_bytes(text);
+        let num_merges = self.final_vocab_size.unwrap() - self.original_vocab_size;
 
         if !self.merge_order.is_empty() || !self.merge_dict.is_empty() {
             println!("Merge order or merge dictionary is not empty, train or load file first");
@@ -153,7 +150,7 @@ impl CustomTokenizer {
 
         for i in 0..num_merges {
             // Chunk to respect word boundaries
-            let chunk_stats: HashMap<(i32, i32), i32> = chunk_tokens
+            let chunk_stats: HashMap<(u32, u32), u32> = chunk_tokens
                 .iter()
                 .flat_map(|chunk| self.get_stats(chunk.clone()))
                 .fold(HashMap::new(), |mut acc, (pair, count)| {
@@ -161,28 +158,24 @@ impl CustomTokenizer {
                     acc
                 });
 
-            let top_pair: Option<((i32, i32), i32)> = chunk_stats
+            let top_pair: ((u32, u32), u32) = chunk_stats
                 .iter()
-                .max_by_key(|&(pair, count)| count)
-                .map(|&pair, &count| (pair, count))
+                .max_by_key(|&(_pair, count)| count)
+                .map(|(&pair, &count)| (pair, count))
                 .expect("No pairs found");
 
-            if top_pair.is_none() {
-                println!("No more pairs to merge");
-                break;
-            }
-            if top_pair[1] <= 2 {
+            if top_pair.1 <= 2 {
                 println!(
                     "Stop merging early since top hit only has {} occurences",
-                    top_pair[1]
+                    top_pair.1
                 );
             }
 
-            let pair: (i32, i32) = top_pair[0];
-            let new_id: i32 = self.original_vocab_size + i;
+            let pair: (u32, u32) = top_pair.0;
+            let new_id: u32 = self.original_vocab_size + i;
 
             for j in 0..chunk_tokens.len() {
-                chunk_tokens[j] = self.merge_tokens(*pair, chunk_tokens[j].clone(), new_id);
+                chunk_tokens[j] = self.merge_tokens(pair, chunk_tokens[j].clone(), new_id);
             }
 
             self.merge_order.push(pair);
