@@ -1,3 +1,4 @@
+use crate::config::Config;
 use burn::{
     module::Module,
     nn::{Gelu, Linear, LinearConfig},
@@ -13,14 +14,14 @@ pub struct SelfAttention<B: Backend> {
 }
 
 impl<B: Backend> SelfAttention<B> {
-    pub fn new(n_embed: usize, n_head: usize, device: &B::Device) -> Self {
-        Self {
+    pub fn new(config: &Config, device: &B::Device) -> Self {
+        return Self {
             // qkv attn is basically q, k, and v tensors concatenated
-            qkv_attn: LinearConfig::new(n_embed, n_embed * 3).init(device),
-            c_proj: LinearConfig::new(n_embed, n_embed).init(device),
-            n_embed,
-            n_head,
-        }
+            qkv_attn: LinearConfig::new(config.n_embed, config.n_embed * 3).init(device),
+            c_proj: LinearConfig::new(config.n_embed, config.n_embed).init(device),
+            n_embed: config.n_embed,
+            n_head: config.n_head,
+        };
     }
 
     /// Forward pass through the self-attention layer
@@ -85,12 +86,12 @@ pub struct Mlp<B: Backend> {
 }
 
 impl<B: Backend> Mlp<B> {
-    pub fn new(n_embed: usize, device: &B::Device) -> Self {
-        Self {
-            c_fc: LinearConfig::new(n_embed, n_embed * 4).init(device),
-            c_proj: LinearConfig::new(n_embed * 4, n_embed).init(device),
+    pub fn new(config: &Config, device: &B::Device) -> Self {
+        return Self {
+            c_fc: LinearConfig::new(config.n_embed, config.n_embed * 4).init(device),
+            c_proj: LinearConfig::new(config.n_embed * 4, config.n_embed).init(device),
             activation: Gelu::new(),
-        }
+        };
     }
 
     /// Forward pass through the MLP
@@ -112,12 +113,24 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = Default::default();
 
-        let n_embed = 768;
-        let n_head = 12;
-        let seq_len = 10;
-        let batch_size = 2;
+        let n_layer = 2;
+        let n_embed = 128;
+        let n_head = 4;
+        let vocab_size = 1000;
+        let block_size = 64;
 
-        let attention = SelfAttention::new(n_embed, n_head, &device);
+        let config = Config {
+            block_size,
+            vocab_size,
+            n_layer,
+            n_embed,
+            n_head,
+        };
+
+        let attention = SelfAttention::new(&config, &device);
+
+        let batch_size = 2;
+        let seq_len = 64;
 
         // Create input: [batch_size, seq_len, n_embed]
         let input = Tensor::<Backend, 3>::random(
@@ -138,11 +151,24 @@ mod tests {
         type Backend = NdArray<f32>;
         let device = Default::default();
 
-        let n_embed = 768;
+        let n_layer = 2;
+        let n_embed = 128;
+        let n_head = 4;
+        let vocab_size = 1000;
+        let block_size = 64;
+
+        let config = Config {
+            block_size,
+            vocab_size,
+            n_layer,
+            n_embed,
+            n_head,
+        };
+
         let seq_len = 10;
         let batch_size = 2;
 
-        let mlp = Mlp::new(n_embed, &device);
+        let mlp = Mlp::new(&config, &device);
 
         // Create input: [batch_size, seq_len, n_embed]
         let input = Tensor::<Backend, 3>::random(

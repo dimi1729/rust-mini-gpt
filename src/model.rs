@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::primitives::{Mlp, SelfAttention};
 use burn::{
     module::Module,
@@ -14,12 +15,12 @@ pub struct Block<B: Backend> {
 }
 
 impl<B: Backend> Block<B> {
-    pub fn new(n_embed: usize, n_head: usize, device: &B::Device) -> Self {
+    pub fn new(config: &Config, device: &B::Device) -> Self {
         return Self {
-            ln_1: LayerNormConfig::new(n_embed).init(device),
-            ln_2: LayerNormConfig::new(n_embed).init(device),
-            attn: SelfAttention::new(n_embed, n_head, device),
-            mlp: Mlp::new(n_embed, device),
+            ln_1: LayerNormConfig::new(config.n_embed).init(device),
+            ln_2: LayerNormConfig::new(config.n_embed).init(device),
+            attn: SelfAttention::new(config, device),
+            mlp: Mlp::new(config, device),
         };
     }
 
@@ -43,26 +44,19 @@ pub struct MiniGPT<B: Backend> {
 }
 
 impl<B: Backend> MiniGPT<B> {
-    pub fn new(
-        n_layer: usize,
-        n_embed: usize,
-        n_head: usize,
-        vocab_size: usize,
-        block_size: usize,
-        device: &B::Device,
-    ) -> Self {
+    pub fn new(config: &Config, device: &B::Device) -> Self {
         // Use a vector instead of nn.ModuleDict
         let mut blocks = Vec::new();
-        for _ in 0..n_layer {
-            blocks.push(Block::new(n_embed, n_head, device));
+        for _ in 0..config.n_layer {
+            blocks.push(Block::new(config, device));
         }
 
         Self {
-            wte: EmbeddingConfig::new(vocab_size, n_embed).init(device),
-            wpe: EmbeddingConfig::new(block_size, n_embed).init(device),
+            wte: EmbeddingConfig::new(config.vocab_size, config.n_embed).init(device),
+            wpe: EmbeddingConfig::new(config.block_size, config.n_embed).init(device),
             blocks,
-            ln_f: LayerNormConfig::new(n_embed).init(device),
-            lm_head: LinearConfig::new(n_embed, vocab_size).init(device),
+            ln_f: LayerNormConfig::new(config.n_embed).init(device),
+            lm_head: LinearConfig::new(config.n_embed, config.vocab_size).init(device),
         }
     }
 
@@ -109,7 +103,15 @@ mod tests {
         let vocab_size = 1000;
         let block_size = 64;
 
-        let model = MiniGPT::new(n_layer, n_embed, n_head, vocab_size, block_size, &device);
+        let config = Config {
+            block_size,
+            vocab_size,
+            n_layer,
+            n_embed,
+            n_head,
+        };
+
+        let model = MiniGPT::new(&config, &device);
 
         // Create input: batch_size=2, seq_len=8
         let data: [[i32; 8]; 2] = [[1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16]];

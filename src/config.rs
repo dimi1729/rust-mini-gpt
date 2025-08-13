@@ -1,12 +1,19 @@
+#[derive(Debug, Clone)]
 pub struct Config {
-    pub block_size: i32,
-    pub vocab_size: i32,
-    pub n_layer: i8,
-    pub n_head: i8,
-    pub n_embed: i32,
+    pub block_size: usize,
+    pub vocab_size: usize,
+    pub n_layer: usize,
+    pub n_head: usize,
+    pub n_embed: usize,
 }
 impl Config {
-    pub fn new(block_size: i32, vocab_size: i32, n_layer: i8, n_head: i8, n_embed: i32) -> Config {
+    pub fn new(
+        block_size: usize,
+        vocab_size: usize,
+        n_layer: usize,
+        n_head: usize,
+        n_embed: usize,
+    ) -> Config {
         return Config {
             block_size,
             vocab_size,
