@@ -5,7 +5,7 @@ pub struct CustomTokenizer {
     original_vocab_size: u32,
     merge_dict: HashMap<(u32, u32), u32>,
     vocab: HashMap<u32, String>,
-    final_vocab_size: Option<u32>,
+    pub final_vocab_size: Option<u32>,
     merge_order: Vec<(u32, u32)>,
 }
 

@@ -4401,6 +4401,7 @@ name = "rust-mini-gpt"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-autodiff",
  "burn-ndarray",
  "burn-wgpu",
  "polars",

@@ -2,8 +2,14 @@ use crate::config::Config;
 use crate::primitives::{Mlp, SelfAttention};
 use burn::{
     module::Module,
-    nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig},
-    tensor::{Int, Tensor, backend::Backend},
+    nn::{
+        Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig,
+        loss::CrossEntropyLossConfig,
+    },
+    tensor::{
+        Int, Tensor,
+        backend::{AutodiffBackend, Backend},
+    },
 };
 
 #[derive(Module, Debug)]
@@ -24,13 +30,11 @@ impl<B: Backend> Block<B> {
         };
     }
 
-    pub fn forward(&self, mut input: Tensor<B, 3>) -> Tensor<B, 3> {
-        input = self.ln_1.forward(input);
-        input = self.attn.forward(input);
-        input = self.ln_2.forward(input);
-        input = self.mlp.forward(input);
-
-        return input;
+    pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
+        // Residual connections with layer norm
+        let x = input.clone() + self.attn.forward(self.ln_1.forward(input.clone()));
+        let x = x.clone() + self.mlp.forward(self.ln_2.forward(x));
+        return x;
     }
 }
 
@@ -85,11 +89,62 @@ impl<B: Backend> MiniGPT<B> {
 
         return logits;
     }
+
+    pub fn forward_with_loss(
+        &self,
+        input: Tensor<B, 2, Int>,
+        targets: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>) {
+        let logits = self.forward(input);
+        let loss = self.calculate_loss(logits.clone(), targets);
+        (logits, loss)
+    }
+
+    fn calculate_loss(&self, logits: Tensor<B, 3>, targets: Tensor<B, 2, Int>) -> Tensor<B, 1> {
+        let (batch_size, seq_len, vocab_size) = logits.dims().into();
+
+        // Reshape logits from [B, T, V] to [B*T, V]
+        let logits_flat = logits.clone().reshape([batch_size * seq_len, vocab_size]);
+
+        // Reshape targets from [B, T] to [B*T]
+        let targets_flat = targets.reshape([batch_size * seq_len]);
+
+        // Calculate cross entropy loss
+        let loss_config = CrossEntropyLossConfig::new();
+        let loss_fn = loss_config.init(&logits.device());
+
+        loss_fn.forward(logits_flat, targets_flat)
+    }
+}
+
+// For training with autodiff backend
+impl<B: AutodiffBackend> MiniGPT<B> {
+    pub fn training_step(
+        &self,
+        input: Tensor<B, 2, Int>,
+        targets: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>) {
+        self.forward_with_loss(input, targets)
+    }
+}
+
+// Training batch structure
+#[derive(Clone, Debug)]
+pub struct TrainingBatch<B: Backend> {
+    pub inputs: Tensor<B, 2, Int>,
+    pub targets: Tensor<B, 2, Int>,
+}
+
+impl<B: Backend> TrainingBatch<B> {
+    pub fn new(inputs: Tensor<B, 2, Int>, targets: Tensor<B, 2, Int>) -> Self {
+        Self { inputs, targets }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use burn_autodiff::Autodiff;
     use burn_ndarray::NdArray;
 
     #[test]
@@ -120,7 +175,81 @@ mod tests {
 
         let output = model.forward(input);
 
-        // Check output shape: [batch_size=2, seq_len=8, vocab_size=128]
+        // Check output shape: [batch_size=2, seq_len=8, vocab_size=1000]
         assert_eq!(output.shape().dims, [2, 8, 1000]);
+    }
+
+    #[test]
+    fn test_mini_gpt_loss_calculation() {
+        type Backend = Autodiff<NdArray<f32>>;
+        let device = Default::default();
+
+        let config = Config {
+            block_size: 32,
+            vocab_size: 100,
+            n_layer: 1,
+            n_embed: 64,
+            n_head: 2,
+        };
+
+        let model = MiniGPT::new(&config, &device);
+
+        // Create input and target tensors
+        let inputs_data = [[1, 2, 3, 4], [5, 6, 7, 8]];
+        let targets_data = [[2, 3, 4, 5], [6, 7, 8, 9]];
+
+        let inputs = Tensor::<Backend, 2, Int>::from_data(inputs_data, &device);
+        let targets = Tensor::<Backend, 2, Int>::from_data(targets_data, &device);
+
+        let (logits, loss) = model.forward_with_loss(inputs, targets);
+
+        // Check shapes
+        assert_eq!(logits.shape().dims, [2, 4, 100]);
+        assert_eq!(loss.shape().dims, [1]);
+
+        // Loss should be positive
+        let loss_value = loss.into_data().to_vec::<f32>().unwrap()[0];
+        assert!(loss_value > 0.0);
+    }
+
+    #[test]
+    fn test_training_step_with_gradients() {
+        type Backend = Autodiff<NdArray<f32>>;
+        let device = Default::default();
+
+        let config = Config {
+            block_size: 16,
+            vocab_size: 50,
+            n_layer: 1,
+            n_embed: 32,
+            n_head: 2,
+        };
+
+        let model = MiniGPT::new(&config, &device);
+
+        // Create training batch
+        let inputs_data = [[1, 2, 3], [4, 5, 6]];
+        let targets_data = [[2, 3, 4], [5, 6, 7]];
+
+        let inputs = Tensor::<Backend, 2, Int>::from_data(inputs_data, &device);
+        let targets = Tensor::<Backend, 2, Int>::from_data(targets_data, &device);
+
+        // Execute training step
+        let (logits, loss) = model.training_step(inputs, targets);
+
+        // Check that we have a valid loss
+        let loss_value = loss.clone().into_data().to_vec::<f32>().unwrap()[0];
+        assert!(loss_value > 0.0);
+
+        // Check output shapes
+        assert_eq!(logits.shape().dims, [2, 3, 50]);
+        assert_eq!(loss.shape().dims, [1]);
+
+        // Test backward pass
+        let _grads = loss.backward();
+
+        // Verify gradients were computed (this should not panic)
+        println!("Backward pass completed successfully");
+        println!("Loss: {:.4}", loss_value);
     }
 }

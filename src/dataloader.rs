@@ -1,5 +1,5 @@
-use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
+use burn::tensor::{Int, Tensor};
 
 pub struct DataLoader<B: Backend> {
     pub device: B::Device,
@@ -36,7 +36,7 @@ impl<B: Backend> DataLoader<B> {
         };
     }
 
-    pub fn next_batch(&mut self) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    pub fn next_batch(&mut self) -> (Tensor<B, 2, Int>, Tensor<B, 2, Int>) {
         let end = self.current_position + self.b * self.t;
 
         // Check if we need to wrap around
