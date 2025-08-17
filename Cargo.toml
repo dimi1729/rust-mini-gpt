@@ -10,3 +10,5 @@ regex = "1.10"
 burn = { version = "0.18.0", features = ["train", "std"], default-features = false }
 burn-wgpu = "0.18.0"
 burn-ndarray = "0.18.0"
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.8"

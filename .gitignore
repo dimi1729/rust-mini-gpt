@@ -16,3 +16,6 @@ target
 # Added by cargo
 
 /target
+
+# Data files
+# data/ # Include data files for now since they are small and useful to see
