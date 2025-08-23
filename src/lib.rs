@@ -1,6 +1,7 @@
+pub mod batcher;
 pub mod config;
 pub mod custom_tokenizer;
-pub mod dataloader;
+pub mod dataset;
 pub mod distributed_data_parallel;
 pub mod model;
 pub mod primitives;

@@ -1,6 +1,11 @@
+// Burn needs to use its proper Dataset + Dataloader traits to
+// actually use the LearnerBuilder TUI so this code is
+// unnessecary, but kept to show how to implement a simple dataloader
+// manually
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};
 
+#[derive(Clone)]
 pub struct DataLoader<B: Backend> {
     pub device: B::Device,
     b: usize, // batch size

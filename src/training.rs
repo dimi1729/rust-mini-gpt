@@ -1,188 +1,313 @@
+use crate::batcher::GPTBatcher;
 use crate::config::Config;
-use crate::dataloader::DataLoader;
+use crate::dataset::GPTDataset;
 use crate::model::{MiniGPT, TrainingBatch};
-use burn::tensor::{Int, Tensor, backend::AutodiffBackend};
+use burn::{
+    config::Config as BurnConfig,
+    data::{dataloader::DataLoaderBuilder, dataset::Dataset},
+    optim::AdamConfig,
+    prelude::*,
+    record::CompactRecorder,
+    tensor::{backend::AutodiffBackend, Int, Tensor},
+    train::{
+        metric::{AccuracyMetric, LossMetric},
+        ClassificationOutput, LearnerBuilder, TrainOutput, TrainStep, ValidStep,
+    },
+};
 
-pub struct SimpleTrainer<B: AutodiffBackend> {
-    model: MiniGPT<B>,
-    device: B::Device,
-}
-
-impl<B: AutodiffBackend> SimpleTrainer<B> {
-    pub fn new(config: &Config, device: B::Device) -> Self {
-        let model = MiniGPT::new(config, &device);
-
-        Self { model, device }
-    }
-
-    pub fn train_step(&mut self, batch: TrainingBatch<B>, learning_rate: f64) -> f32 {
-        // Forward pass with loss calculation
-        let (_logits, loss) = self.model.training_step(batch.inputs, batch.targets);
-
-        // Backward pass - compute gradients
-        let grads = loss.backward();
-
-        // Manual parameter update using SGD (simplified)
-        // In a real implementation, you'd use burn's optimizer framework
-        self.model = self.simple_sgd_step(self.model.clone(), grads, learning_rate);
-
-        // Return loss value
-        loss.into_data().to_vec::<f32>().unwrap()[0]
-    }
-
-    // Simple SGD implementation for demonstration
-    // Note: This is a simplified version - real optimizers are more complex
-    fn simple_sgd_step(
-        &self,
-        model: MiniGPT<B>,
-        _grads: B::Gradients,
-        _learning_rate: f64,
-    ) -> MiniGPT<B> {
-        // In a real implementation, you would iterate through all parameters
-        // and update them using the gradients. For now, we just return the model
-        // as this is primarily for demonstration purposes.
-
-        // The actual parameter update would look something like:
-        // for param in model.parameters() {
-        //     let grad = param.grad(&grads);
-        //     param = param - learning_rate * grad;
-        // }
-
-        model
-    }
-
-    pub fn validate_step(&self, batch: TrainingBatch<B>) -> f32 {
-        let (_, loss) = self.model.forward_with_loss(batch.inputs, batch.targets);
-        loss.into_data().to_vec::<f32>().unwrap()[0]
-    }
-
-    pub fn train_epoch(
-        &mut self,
-        dataloader: &mut DataLoader<B>,
-        steps_per_epoch: usize,
-        learning_rate: f64,
-    ) -> f32 {
-        let mut total_loss = 0.0;
-        let mut step_count = 0;
-
-        for step in 0..steps_per_epoch {
-            // Get batch from dataloader
-            let (inputs, targets) = dataloader.next_batch();
-            let batch = TrainingBatch::new(inputs, targets);
-
-            // Training step
-            let loss = self.train_step(batch, learning_rate);
-            total_loss += loss;
-            step_count += 1;
-
-            if step % 100 == 0 && step > 0 {
-                println!("Step {}/{}, Loss: {:.4}", step, steps_per_epoch, loss);
-            }
-        }
-
-        total_loss / step_count as f32
-    }
-
-    pub fn generate(&self, prompt: Tensor<B, 2, Int>, max_new_tokens: usize) -> Vec<u32> {
-        let mut generated = Vec::new();
-        let mut current_input = prompt;
-
-        for _ in 0..max_new_tokens {
-            // Forward pass to get logits
-            let logits = self.model.forward(current_input.clone());
-
-            // Get the last token's logits [B, vocab_size]
-            let seq_len = logits.dims()[1];
-            let last_logits =
-                logits
-                    .clone()
-                    .slice([0..1, (seq_len - 1)..seq_len, 0..logits.dims()[2]]);
-            let last_logits = last_logits.squeeze::<2>(1); // [1, vocab_size]
-
-            // For simplicity, just take argmax (greedy sampling)
-            let next_token = last_logits.argmax(1);
-
-            // Extract the token value
-            let token_value = next_token.into_data().to_vec::<i64>().unwrap()[0] as u32;
-            generated.push(token_value);
-
-            // Update input for next iteration
-            // Append the new token to the sequence
-            let new_token_tensor =
-                Tensor::<B, 2, Int>::from_data([[token_value as i32]], &self.device);
-
-            // Concatenate along sequence dimension
-            current_input = Tensor::cat(vec![current_input, new_token_tensor], 1);
-
-            // Keep only the last block_size tokens to fit model's context window
-            let seq_len = current_input.dims()[1];
-            if seq_len > 128 {
-                // Limit context length
-                let start_idx = seq_len - 128;
-                current_input = current_input.slice([0..1, start_idx..seq_len]);
-            }
-        }
-
-        generated
-    }
-
-    pub fn model(&self) -> &MiniGPT<B> {
-        &self.model
-    }
-}
-
-// Training configuration
-#[derive(Debug, Clone)]
+// Training configuration using Burn's Config system
+#[derive(BurnConfig)]
 pub struct TrainingConfig {
-    pub epochs: usize,
-    pub learning_rate: f64,
+    pub model: ModelConfig,
+    pub optimizer: AdamConfig,
+    #[config(default = 5)]
+    pub num_epochs: usize,
+    #[config(default = 4)]
     pub batch_size: usize,
+    #[config(default = 32)]
     pub sequence_length: usize,
+    #[config(default = 4)]
+    pub num_workers: usize,
+    #[config(default = 42)]
+    pub seed: u64,
+    #[config(default = 3e-4)]
+    pub learning_rate: f64,
+    #[config(default = 500)]
     pub steps_per_epoch: usize,
+    #[config(default = 50)]
     pub validation_steps: usize,
-    pub print_every: usize,
+}
+
+// Model configuration
+#[derive(BurnConfig)]
+pub struct ModelConfig {
+    #[config(default = 128)]
+    pub block_size: usize,
+    #[config(default = 50257)]
+    pub vocab_size: usize,
+    #[config(default = 12)]
+    pub n_layer: usize,
+    #[config(default = 768)]
+    pub n_embed: usize,
+    #[config(default = 12)]
+    pub n_head: usize,
+}
+
+impl ModelConfig {
+    pub fn create_new(vocab_size: usize, n_embed: usize) -> Self {
+        let mut config = ModelConfig::new();
+        config.vocab_size = vocab_size;
+        config.n_embed = n_embed;
+        config.block_size = 128;
+        config.n_layer = 6;
+        config.n_head = 8;
+        config
+    }
+
+    pub fn init<B: Backend>(&self, device: &B::Device) -> MiniGPT<B> {
+        let config = Config {
+            block_size: self.block_size,
+            vocab_size: self.vocab_size,
+            n_layer: self.n_layer,
+            n_embed: self.n_embed,
+            n_head: self.n_head,
+        };
+        MiniGPT::new(&config, device)
+    }
 }
 
 impl Default for TrainingConfig {
     fn default() -> Self {
-        Self {
-            epochs: 5,
-            learning_rate: 3e-4,
-            batch_size: 4,
-            sequence_length: 32,
-            steps_per_epoch: 500,
-            validation_steps: 50,
-            print_every: 100,
-        }
+        let mut config =
+            TrainingConfig::new(ModelConfig::create_new(50257, 768), AdamConfig::new());
+        config.num_epochs = 5;
+        config.batch_size = 4;
+        config.sequence_length = 32;
+        config.num_workers = 1;
+        config.seed = 42;
+        config.learning_rate = 3e-4;
+        config.steps_per_epoch = 500;
+        config.validation_steps = 50;
+        config
     }
 }
 
-pub fn train_model<B: AutodiffBackend>(
-    config: &Config,
-    training_config: &TrainingConfig,
-    mut train_dataloader: DataLoader<B>,
-    device: B::Device,
-) -> Result<SimpleTrainer<B>, Box<dyn std::error::Error>> {
-    println!("Starting training with config: {:?}", training_config);
+// Add forward_classification method to MiniGPT for training compatibility
+impl<B: Backend> MiniGPT<B> {
+    pub fn forward_classification(
+        &self,
+        inputs: Tensor<B, 2, Int>,
+        targets: Tensor<B, 2, Int>,
+    ) -> ClassificationOutput<B> {
+        let logits = self.forward(inputs);
+        let (_, loss) = self.forward_with_loss_from_logits(logits.clone(), targets.clone());
 
-    let mut trainer = SimpleTrainer::new(config, device);
+        // For language modeling, we need to reshape logits and targets for the classification output
+        let [batch_size, seq_len, vocab_size] = logits.dims();
+        let logits_flat = logits.reshape([batch_size * seq_len, vocab_size]);
+        let targets_flat = targets.reshape([batch_size * seq_len]);
 
-    for epoch in 0..training_config.epochs {
-        println!("Epoch {}/{}", epoch + 1, training_config.epochs);
-
-        // Training
-        let train_loss = trainer.train_epoch(
-            &mut train_dataloader,
-            training_config.steps_per_epoch,
-            training_config.learning_rate,
-        );
-
-        println!("Training Loss: {:.4}", train_loss);
-        println!("---");
+        ClassificationOutput::new(loss, logits_flat, targets_flat)
     }
 
-    println!("Training completed!");
-    Ok(trainer)
+    fn forward_with_loss_from_logits(
+        &self,
+        logits: Tensor<B, 3>,
+        targets: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, Tensor<B, 1>) {
+        let loss = self.calculate_loss_from_logits(logits.clone(), targets);
+        (logits, loss)
+    }
+
+    fn calculate_loss_from_logits(
+        &self,
+        logits: Tensor<B, 3>,
+        targets: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 1> {
+        let (batch_size, seq_len, vocab_size) = logits.dims().into();
+
+        // Reshape logits from [B, T, V] to [B*T, V]
+        let logits_flat = logits.clone().reshape([batch_size * seq_len, vocab_size]);
+
+        // Reshape targets from [B, T] to [B*T]
+        let targets_flat = targets.reshape([batch_size * seq_len]);
+
+        // Calculate cross entropy loss
+        let loss_config = burn::nn::loss::CrossEntropyLossConfig::new();
+        let loss_fn = loss_config.init(&logits.device());
+
+        loss_fn.forward(logits_flat, targets_flat)
+    }
+}
+
+// Implement TrainStep for the model
+impl<B: AutodiffBackend> TrainStep<TrainingBatch<B>, ClassificationOutput<B>> for MiniGPT<B> {
+    fn step(&self, batch: TrainingBatch<B>) -> TrainOutput<ClassificationOutput<B>> {
+        let item = self.forward_classification(batch.inputs, batch.targets);
+        TrainOutput::new(self, item.loss.backward(), item)
+    }
+}
+
+// Implement ValidStep for the inner (non-autodiff) model
+impl<B: Backend> ValidStep<TrainingBatch<B>, ClassificationOutput<B>> for MiniGPT<B> {
+    fn step(&self, batch: TrainingBatch<B>) -> ClassificationOutput<B> {
+        self.forward_classification(batch.inputs, batch.targets)
+    }
+}
+
+// Create artifact directory helper
+fn create_artifact_dir(artifact_dir: &str) {
+    std::fs::remove_dir_all(artifact_dir).ok();
+    std::fs::create_dir_all(artifact_dir).expect("Should be able to create artifact dir");
+}
+
+pub fn train_with_burn_tui<B: AutodiffBackend>(
+    tokens: Vec<u32>,
+    vocab_size: usize,
+    device: B::Device,
+    artifact_dir: &str,
+) -> Result<MiniGPT<B>, Box<dyn std::error::Error>>
+where
+    B::InnerBackend: Clone,
+    <B as AutodiffBackend>::InnerBackend: Backend,
+{
+    println!("Start training");
+
+    // Create artifact directory
+    create_artifact_dir(artifact_dir);
+
+    // Create configuration
+    let mut config =
+        TrainingConfig::new(ModelConfig::create_new(vocab_size, 256), AdamConfig::new());
+    config.batch_size = 8;
+    config.sequence_length = 64;
+    config.num_epochs = 3;
+    config.learning_rate = 1e-3;
+
+    // Save config
+    config
+        .save(format!("{artifact_dir}/config.json"))
+        .expect("Config should be saved successfully");
+
+    // Set random seed
+    B::seed(config.seed);
+
+    println!("Creating datasets from {} tokens...", tokens.len());
+
+    // Create training dataset with AutodiffBackend
+    let train_dataset =
+        GPTDataset::<B>::new(tokens.clone(), config.sequence_length, device.clone());
+
+    // Create validation dataset with regular backend (no autodiff needed for validation)
+    // We'll use the same tokens for simplicity, but in practice you'd use separate validation data
+    let valid_tokens = tokens.clone();
+    // For InnerBackend, we typically use the same device but need to ensure type compatibility
+    let valid_device: <B::InnerBackend as Backend>::Device = device.clone();
+    let valid_dataset =
+        GPTDataset::<B::InnerBackend>::new(valid_tokens, config.sequence_length, valid_device);
+
+    println!(
+        "Created {} training samples and {} validation samples",
+        Dataset::len(&train_dataset),
+        Dataset::len(&valid_dataset)
+    );
+
+    // Create batchers for both backends
+    let train_batcher = GPTBatcher::<B>::new(device.clone());
+    let valid_device_for_batcher: <B::InnerBackend as Backend>::Device = device.clone();
+    let valid_batcher = GPTBatcher::<B::InnerBackend>::new(valid_device_for_batcher);
+
+    // Create dataloaders with proper backend types
+    let train_dataloader = DataLoaderBuilder::new(train_batcher)
+        .batch_size(config.batch_size)
+        .shuffle(config.seed)
+        .num_workers(config.num_workers)
+        .build(train_dataset);
+
+    let valid_dataloader = DataLoaderBuilder::new(valid_batcher)
+        .batch_size(config.batch_size)
+        .shuffle(config.seed)
+        .num_workers(config.num_workers)
+        .build(valid_dataset);
+
+    // Init model
+    let model = config.model.init::<B>(&device);
+
+    let learner = LearnerBuilder::new(artifact_dir)
+        .metric_train_numeric(LossMetric::new())
+        .metric_valid_numeric(LossMetric::new())
+        .metric_train_numeric(AccuracyMetric::new())
+        .metric_valid_numeric(AccuracyMetric::new())
+        .with_file_checkpointer(CompactRecorder::new())
+        .devices(vec![device.clone()])
+        .num_epochs(config.num_epochs)
+        .summary() // 🎉 This enables the beautiful TUI!
+        .build(model, config.optimizer.init(), config.learning_rate);
+
+    let model_trained = learner.fit(train_dataloader, valid_dataloader);
+
+    // Save final model
+    model_trained
+        .clone()
+        .save_file(format!("{artifact_dir}/model"), &CompactRecorder::new())
+        .expect("Trained model should be saved successfully");
+
+    println!("Training completed successfully!");
+    println!(
+        "Model saved to: {}/model, logs saved to: {}/",
+        artifact_dir, artifact_dir
+    );
+
+    Ok(model_trained)
+}
+
+// Simple generation function for testing
+pub fn generate<B: AutodiffBackend>(
+    model: &MiniGPT<B>,
+    prompt: Tensor<B, 2, Int>,
+    max_new_tokens: usize,
+    device: &B::Device,
+) -> Vec<u32> {
+    use burn::module::AutodiffModule;
+
+    let mut generated = Vec::new();
+    let mut current_input = prompt;
+    let model = model.valid();
+
+    for _ in 0..max_new_tokens {
+        // Forward pass to get logits
+        let logits = model.forward(current_input.clone().inner());
+
+        // Get the last token's logits [B, vocab_size]
+        let seq_len = logits.dims()[1];
+        let last_logits = logits
+            .clone()
+            .slice([0..1, (seq_len - 1)..seq_len, 0..logits.dims()[2]]);
+        let last_logits = last_logits.squeeze::<2>(1); // [1, vocab_size]
+
+        // For simplicity, just take argmax (greedy sampling)
+        let next_token = last_logits.argmax(1);
+
+        // Extract the token value
+        let token_value = next_token.into_data().to_vec::<i64>().unwrap()[0] as u32;
+        generated.push(token_value);
+
+        // Update input for next iteration
+        let new_token_tensor = Tensor::<B, 2, Int>::from_data([[token_value as i32]], device);
+
+        // Concatenate along sequence dimension
+        current_input = Tensor::cat(vec![current_input, new_token_tensor], 1);
+
+        // Keep only the last block_size tokens to fit model's context window
+        let seq_len = current_input.dims()[1];
+        if seq_len > 128 {
+            // Limit context length
+            let start_idx = seq_len - 128;
+            current_input = current_input.slice([0..1, start_idx..seq_len]);
+        }
+    }
+
+    generated
 }
 
 #[cfg(test)]
@@ -194,104 +319,39 @@ mod tests {
     type TestBackend = Autodiff<NdArray<f32>>;
 
     #[test]
-    fn test_trainer_creation() {
+    fn test_training_config() {
+        let config = TrainingConfig::default();
+        assert_eq!(config.num_epochs, 5);
+        assert_eq!(config.batch_size, 4);
+        assert!(config.learning_rate > 0.0);
+    }
+
+    #[test]
+    fn test_model_config() {
+        let config = ModelConfig::create_new(1000, 256);
+        assert_eq!(config.vocab_size, 1000);
+        assert_eq!(config.n_embed, 256);
+
         let device = Default::default();
-        let config = Config {
-            block_size: 32,
-            vocab_size: 100,
-            n_layer: 2,
-            n_embed: 64,
-            n_head: 4,
-        };
+        let model = config.init::<TestBackend>(&device);
 
-        let _trainer = SimpleTrainer::<TestBackend>::new(&config, device);
-
-        // Just check that trainer was created successfully
-        assert!(true);
+        // Test model creation
+        let input = Tensor::<TestBackend, 2, Int>::from_data([[1, 2, 3]], &device);
+        let output = model.forward(input.inner());
+        assert_eq!(output.shape().dims[2], 1000); // vocab_size
     }
 
     #[test]
-    fn test_training_step() {
+    fn test_classification_output() {
         let device: <TestBackend as burn::tensor::backend::Backend>::Device = Default::default();
-        let config = Config {
-            block_size: 16,
-            vocab_size: 50,
-            n_layer: 1,
-            n_embed: 32,
-            n_head: 2,
-        };
+        let loss = Tensor::<TestBackend, 1>::from_data([2.5], &device);
+        let logits = Tensor::<TestBackend, 2>::from_data([[1.0, 2.0, 3.0]], &device);
+        let targets = Tensor::<TestBackend, 1, Int>::from_data([1], &device);
 
-        let mut trainer = SimpleTrainer::<TestBackend>::new(&config, device.clone());
+        let _output = ClassificationOutput::new(loss.clone(), logits, targets);
 
-        // Create sample batch
-        let inputs = Tensor::<TestBackend, 2, Int>::from_data([[1, 2, 3], [4, 5, 6]], &device);
-        let targets = Tensor::<TestBackend, 2, Int>::from_data([[2, 3, 4], [5, 6, 7]], &device);
-        let batch = TrainingBatch::new(inputs, targets);
-
-        // Perform training step
-        let loss = trainer.train_step(batch, 1e-3);
-
-        // Loss should be positive
-        assert!(loss > 0.0);
-        println!("Training step loss: {}", loss);
-    }
-
-    #[test]
-    fn test_generation() {
-        let device: <TestBackend as burn::tensor::backend::Backend>::Device = Default::default();
-        let config = Config {
-            block_size: 32,
-            vocab_size: 100,
-            n_layer: 1,
-            n_embed: 32,
-            n_head: 2,
-        };
-
-        let trainer = SimpleTrainer::<TestBackend>::new(&config, device.clone());
-
-        // Create a prompt
-        let prompt = Tensor::<TestBackend, 2, Int>::from_data([[1, 2, 3]], &device);
-
-        // Generate tokens
-        let generated = trainer.generate(prompt, 5);
-
-        // Should generate 5 tokens
-        assert_eq!(generated.len(), 5);
-        println!("Generated tokens: {:?}", generated);
-    }
-
-    #[test]
-    fn test_backward_pass() {
-        // Test that demonstrates the key functionality: backward pass computation
-        let device: <TestBackend as burn::tensor::backend::Backend>::Device = Default::default();
-        let config = Config {
-            block_size: 16,
-            vocab_size: 50,
-            n_layer: 1,
-            n_embed: 32,
-            n_head: 2,
-        };
-
-        let trainer = SimpleTrainer::<TestBackend>::new(&config, device.clone());
-
-        // Create sample data
-        let inputs = Tensor::<TestBackend, 2, Int>::from_data([[1, 2, 3], [4, 5, 6]], &device);
-        let targets = Tensor::<TestBackend, 2, Int>::from_data([[2, 3, 4], [5, 6, 7]], &device);
-
-        // Forward pass with loss
-        let (logits, loss) = trainer.model().training_step(inputs, targets);
-
-        // Backward pass to compute gradients
-        let _grads = loss.backward();
-
-        // Verify shapes
-        assert_eq!(logits.shape().dims, [2, 3, 50]);
-        assert_eq!(loss.shape().dims, [1]);
-
+        // Should be able to extract loss value
         let loss_value = loss.into_data().to_vec::<f32>().unwrap()[0];
-        assert!(loss_value > 0.0);
-
-        println!("Forward pass completed - Loss: {:.4}", loss_value);
-        println!("Backward pass completed - Gradients computed successfully");
+        assert!((loss_value - 2.5).abs() < 1e-6);
     }
 }

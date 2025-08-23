@@ -1,16 +1,16 @@
-use rust_mini_gpt::config::Config;
 use rust_mini_gpt::custom_tokenizer::CustomTokenizer;
-use rust_mini_gpt::dataloader::DataLoader;
-use rust_mini_gpt::model::{MiniGPT, TrainingBatch};
-use rust_mini_gpt::training::SimpleTrainer;
+use rust_mini_gpt::training::{generate, train_with_burn_tui};
 
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Int, Tensor};
 use burn_autodiff::Autodiff;
 use burn_ndarray::NdArray;
 use std::fs;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Mini GPT Training");
+
+    // Load and prepare data
     let text = fs::read_to_string("data/tiny_shakespeare.txt")
         .expect("Failed to read tiny_shakespeare.txt");
 
@@ -22,43 +22,82 @@ fn main() {
     let save_path = "data/tokenizer.ron";
     let tokenizer = CustomTokenizer::load(save_path).expect("Failed to load tokenizer");
     let tokens = tokenizer.encode(&text);
-    println!("Tokenized to {} tokens", tokens.len());
+    let vocab_size = tokenizer.final_vocab_size.unwrap() as usize;
+    println!(
+        "Tokenized to {} tokens, using vocab size of {}",
+        tokens.len(),
+        vocab_size
+    );
 
     // Use autodiff backend for training
     type TrainingBackend = Autodiff<NdArray<f32>>;
-    let device: <TrainingBackend as burn::tensor::backend::Backend>::Device = Default::default();
+    let device: <TrainingBackend as Backend>::Device = Default::default();
 
-    // Model configuration
-    let config = Config::new(32, tokenizer.final_vocab_size.unwrap() as usize, 2, 4, 64);
+    // ( if using GPU)
+    // type TrainingBackend = Autodiff<Wgpu<f32, i32>>;
+    // let device = WgpuDevice::default();
 
-    println!("Model config: {:?}", config);
+    // Start training with Burn's LearnerBuilder and TUI
+    println!("\nStarting training with Burn's LearnerBuilder TUI");
 
-    // Create dataloader
-    let mut dataloader = DataLoader::<TrainingBackend>::new(device.clone(), tokens, 2, 16, 0, 1);
+    let artifact_dir = "/tmp/mini-gpt-burn-tui";
 
-    // Create trainer
-    let mut trainer = SimpleTrainer::<TrainingBackend>::new(&config, device.clone());
+    match train_with_burn_tui::<TrainingBackend>(
+        tokens.clone(),
+        vocab_size,
+        device.clone(),
+        artifact_dir,
+    ) {
+        Ok(trained_model) => {
+            println!("Training completed");
 
-    // Train model
-    let num_steps = 10;
-    let lr = 3e-4;
-    for step in 1..(num_steps + 1) {
-        let (inputs, targets) = dataloader.next_batch();
-        let batch = TrainingBatch::new(inputs, targets);
-
-        let loss = trainer.train_step(batch, lr);
-        println!("Step {}: Loss = {:.4}", step, loss);
+            // Test the trained model with generation
+            println!("\nTesting text generation");
+            test_generation(trained_model, &tokenizer, &device)?;
+        }
+        Err(e) => {
+            eprintln!("Training failed: {}", e);
+            return Err(e);
+        }
     }
 
-    // Generate an output from the input prompt
-    let prompt_text = "How are thou";
-    let prompt_vec = tokenizer.encode(prompt_text);
-    let prompt_tokens: Vec<i32> = prompt_vec.iter().map(|&x| x as i32).collect();
-    let prompt_tensor = Tensor::<TrainingBackend, 2, Int>::from_data(
-        burn::tensor::TensorData::new(prompt_tokens.clone(), [1, prompt_vec.len()]),
-        &device,
-    );
+    Ok(())
+}
 
-    let response = trainer.generate(prompt_tensor, 10);
-    println!("Generated response: {:?}", tokenizer.decode(response));
+fn test_generation<B: AutodiffBackend>(
+    model: rust_mini_gpt::model::MiniGPT<B>,
+    tokenizer: &CustomTokenizer,
+    device: &B::Device,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Test text samples");
+
+    let prompts = vec!["HAMLET:", "To be or not to be", "ROMEO:"];
+
+    for prompt in prompts {
+        println!("\nPrompt: \"{}\"", prompt);
+
+        let prompt_tokens = tokenizer.encode(prompt);
+        if prompt_tokens.is_empty() {
+            panic!("Empty prompt tokens");
+        }
+
+        let prompt_tensor = Tensor::<B, 2, Int>::from_data(
+            burn::tensor::TensorData::new(
+                prompt_tokens
+                    .iter()
+                    .map(|&x| x as i32)
+                    .collect::<Vec<i32>>(),
+                [1, prompt_tokens.len()],
+            ),
+            device,
+        );
+
+        // Generate with the model (we need to add a generation method)
+        let generated_tokens = generate(&model, prompt_tensor, 20, device);
+        let generated_text = tokenizer.decode(generated_tokens);
+
+        println!("Generated: \"{}{}\"", prompt, generated_text);
+    }
+
+    Ok(())
 }

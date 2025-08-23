@@ -1,15 +1,22 @@
 [package]
 name = "rust-mini-gpt"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 polars = { version = "0.49.1", features = ["lazy"] }
-tokenizers = { version = "0.21.2", features = ["http"] }
+tokenizers = { version = "0.20.4", features = ["http"] }
 regex = "1.10"
-burn = { version = "0.18.0", features = ["train", "std", "autodiff"], default-features = false }
+burn = { version = "0.18.0", features = [
+    "train",
+    "std",
+    "autodiff",
+], default-features = false }
 burn-wgpu = "0.18.0"
 burn-ndarray = "0.18.0"
 burn-autodiff = "0.18.0"
+burn-train = "0.18.0"
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.8"
+unicode-width = "0.2.0"
+derive-new = "0.7"

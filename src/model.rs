@@ -3,12 +3,12 @@ use crate::primitives::{Mlp, SelfAttention};
 use burn::{
     module::Module,
     nn::{
-        Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig,
-        loss::CrossEntropyLossConfig,
+        loss::CrossEntropyLossConfig, Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig,
+        Linear, LinearConfig,
     },
     tensor::{
-        Int, Tensor,
         backend::{AutodiffBackend, Backend},
+        Int, Tensor,
     },
 };
 
